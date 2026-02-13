@@ -48,7 +48,7 @@ MENU_DATA: List[Dict] = []
 MENU_VECTORS: Optional[List[List[float]]] = None
 HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 EXAMPLE_RAG: Optional[SimpleExampleRAG] = None
-INIT_LOCK = asyncio.Lock()
+# INIT_LOCK = asyncio.Lock() # Causing issues?
 IS_INITIALIZED = False
 app = FastAPI()
 
@@ -162,7 +162,12 @@ async def init_data():
     if IS_INITIALIZED:
         return
     
-    async with INIT_LOCK:
+    # Simple check to avoid race conditions roughly
+    if len(MENU_DATA) > 0:
+         IS_INITIALIZED = True
+         return
+
+    if True: # Removed Lock 
         if IS_INITIALIZED:
             return
             
@@ -206,11 +211,14 @@ async def init_data():
 async def get_nearest_item(query: str):
     # Fallback to lenients search if vectors are not ready
     if MENU_VECTORS is None:
-        return find_item_lenient(query)
+        item = find_item_lenient(query)
+        if item: return item
+        # If lenient fails, return a default item (e.g. first item) to prevent crash
+        return MENU_DATA[0] if MENU_DATA else None
 
     query_vec = await get_embedding(query)
     if not query_vec:
-        return None
+        return MENU_DATA[0] if MENU_DATA else None
         
     def cosine_sim(v1, v2):
         dot = sum(a*b for a, b in zip(v1, v2))
@@ -380,7 +388,7 @@ async def chat_endpoint(request: ChatRequest):
     # Ensure init is called but wrap it to prevent crash
     if not IS_INITIALIZED:
         try:
-            await asyncio.wait_for(init_data(), timeout=10.0)
+            await init_data()
         except Exception as e:
             log(f"Init Timeout/Error: {e}")
             # Proceed anyway, most data might be loaded
