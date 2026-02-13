@@ -31,8 +31,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_HOST_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 MODEL_EMBED = "nomic-embed-text"
 SQLITE_PATH = os.path.join(BASE_DIR, "aureeq.db")
-MENU_JSON_PATH = os.path.join(DATA_DIR, "menu.json")
-EXAMPLES_TXT_PATH = os.path.join(DATA_DIR, "sales_examples_new.txt")
+# VERCEL FIX: Data files must be inside api/ to be bundled correctly
+MENU_JSON_PATH = os.path.join(BASE_DIR, "menu.json")
+# Fallback to ../data if not in api/ (for local dev)
+if not os.path.exists(MENU_JSON_PATH):
+    MENU_JSON_PATH = os.path.join(DATA_DIR, "menu.json")
+
+EXAMPLES_TXT_PATH = os.path.join(BASE_DIR, "sales_examples_new.txt")
+if not os.path.exists(EXAMPLES_TXT_PATH):
+    EXAMPLES_TXT_PATH = os.path.join(DATA_DIR, "sales_examples_new.txt")
 
 # Audio output for Vercel
 IS_VERCEL = "VERCEL" in os.environ
