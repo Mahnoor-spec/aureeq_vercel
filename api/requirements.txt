@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+numpy
+scikit-learn
+edge-tts
+pydantic
+pydantic-settings
+python-multipart
+# Removed heavy/unused langchain if not in use by server.py directly
