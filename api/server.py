@@ -38,6 +38,10 @@ EXAMPLES_TXT_PATH = os.path.join(DATA_DIR, "sales_examples_new.txt")
 IS_VERCEL = "VERCEL" in os.environ
 AUDIO_OUTPUT_DIR = "/tmp" if IS_VERCEL else DATA_DIR
 
+# DB path handling for Vercel (read-only filesystem bypass)
+SQLITE_TEMPLATE_PATH = os.path.join(BASE_DIR, "aureeq.db")
+SQLITE_PATH = "/tmp/aureeq_prod.db" if IS_VERCEL else SQLITE_TEMPLATE_PATH
+
 
 # Global State
 MENU_DATA: List[Dict] = []
@@ -118,18 +122,40 @@ def save_order(user_id: str, items: list, total_price: float):
 # DATA LOADING & VECTOR SEARCH (RAG)
 # ==================================================================================
 
-async def get_ollama_embedding(text: str):
-    try:
-        resp = await HTTP_CLIENT.post(
-            f"{OLLAMA_HOST_URL}/api/embeddings",
-            json={"model": MODEL_EMBED, "prompt": text},
-            timeout=5.0
-        )
-        if resp.status_code == 200:
-            return resp.json().get("embedding")
-    except Exception as e:
-        log(f"Embedding ID Error: {e}")
-    return None
+async def get_embedding(text: str):
+    """
+    Robust embedding helper. Uses OpenAI if on Vercel or if Ollama fails.
+    """
+    if IS_VERCEL or not OLLAMA_HOST_URL:
+        # OpenAI Embedding (Standard for Vercel)
+        if not OPENAI_API_KEY:
+            log("ERROR: OPENAI_API_KEY missing for embeddings on Vercel!")
+            return None
+        try:
+            resp = await HTTP_CLIENT.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                json={"input": text, "model": "text-embedding-3-small"},
+                timeout=10.0
+            )
+            if resp.status_code == 200:
+                return resp.json()["data"][0]["embedding"]
+        except Exception as e:
+            log(f"OpenAI Embedding Error: {e}")
+        return None
+    else:
+        # Ollama Embedding (Local/Docker fallback)
+        try:
+            resp = await HTTP_CLIENT.post(
+                f"{OLLAMA_HOST_URL}/api/embeddings",
+                json={"model": MODEL_EMBED, "prompt": text},
+                timeout=5.0
+            )
+            if resp.status_code == 200:
+                return resp.json().get("embedding")
+        except Exception as e:
+            log(f"Ollama Embedding Error: {e}")
+        return None
 
 async def init_data():
     global MENU_DATA, MENU_VECTORS, IS_INITIALIZED, HTTP_CLIENT
@@ -147,24 +173,32 @@ async def init_data():
             log("ERROR: menu.json not found!")
             return
 
+        # 1. Database Setup for Vercel
+        if IS_VERCEL and os.path.exists(SQLITE_TEMPLATE_PATH):
+            import shutil
+            if not os.path.exists(SQLITE_PATH):
+                log(f"Copying DB template to {SQLITE_PATH}")
+                shutil.copy2(SQLITE_TEMPLATE_PATH, SQLITE_PATH)
+
         try:
             with open(MENU_JSON_PATH, "r", encoding="utf-8") as f:
                 MENU_DATA = json.load(f)
             log(f"Loaded {len(MENU_DATA)} menu items.")
             
-            # Pre-compute vectors if possible, or computing on demand (batching preferred)
-            # For simplicity/speed in this restart, we'll embed on demand or do a quick batch if small
-            # Actually, let's do sequential async init for reliability
-            vectors = []
-            log("Initializing Embeddings...")
-            for item in MENU_DATA:
+            log("Initializing Embeddings (Parallel)...")
+            async def get_item_vec(item):
                 text = f"{item['name']} {item['description']} {item['category']}"
-                vec = await get_ollama_embedding(text)
-                if vec:
-                    vectors.append(vec)
-                else:
-                    vectors.append([0.0]*768) # Fallback
+                return await get_embedding(text)
+
+            tasks = [get_item_vec(item) for item in MENU_DATA]
+            raw_vectors = await asyncio.gather(*tasks)
             
+            vectors = []
+            for vec in raw_vectors:
+                # OpenAI uses 1536 dim, Ollama uses 768. 
+                # We adapt based on what we get, default to 0.0 of len 1536 if None to be safe for OpenAI.
+                vectors.append(vec if vec else [0.0]*1536) 
+
             MENU_VECTORS = vectors
             log("Embeddings Initialized.")
             
@@ -173,7 +207,7 @@ async def init_data():
 
         # Initialize Example RAG
         global EXAMPLE_RAG
-        EXAMPLE_RAG = SimpleExampleRAG(EXAMPLES_TXT_PATH, get_ollama_embedding)
+        EXAMPLE_RAG = SimpleExampleRAG(EXAMPLES_TXT_PATH, get_embedding)
         await EXAMPLE_RAG.load_examples()
         IS_INITIALIZED = True
 
@@ -181,7 +215,7 @@ async def get_nearest_item(query: str):
     if MENU_VECTORS is None or not MENU_DATA:
         return None
     
-    query_vec = await get_ollama_embedding(query)
+    query_vec = await get_embedding(query)
     if not query_vec:
         return None
         
