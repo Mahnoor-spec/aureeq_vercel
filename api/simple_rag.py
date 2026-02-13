@@ -1,7 +1,6 @@
 import os
 import re
 import random
-import numpy as np
 from typing import List, Tuple, Optional
 
 class SimpleExampleRAG:
@@ -12,7 +11,7 @@ class SimpleExampleRAG:
         self.file_path = file_path
         self.embedding_fn = embedding_fn
         self.examples: List[Tuple[str, str]] = [] # (User Query, Agent Response)
-        self.vectors: Optional[np.ndarray] = None
+        self.vectors: Optional[List[List[float]]] = None
         self.is_ready = False
 
     async def load_examples(self):
@@ -24,26 +23,21 @@ class SimpleExampleRAG:
             with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
             
-            # Parse format: "1. User: ... Agent: ..."
-            # Split by numbered lists or double newlines
             raw_blocks = re.split(r'\n\d+\.\s+User:', text)
             
             parsed = []
             for block in raw_blocks:
                 if not block.strip(): continue
-                # Look for "Agent:" split
                 parts = block.split("Agent:", 1)
                 if len(parts) == 2:
                     user_q = parts[0].strip(' "”\n')
                     agent_a = parts[1].strip(' "”\n')
-                    # Clean up
                     user_q = re.sub(r'^\s*User:\s*', '', user_q, flags=re.IGNORECASE).strip(' "')
                     parsed.append((user_q, agent_a))
             
             self.examples = parsed
             print(f"Loaded {len(self.examples)} sales examples.")
             
-            # Pre-compute embeddings for User queries
             vectors = []
             for q, _ in self.examples:
                 vec = await self.embedding_fn(q)
@@ -53,7 +47,7 @@ class SimpleExampleRAG:
                     vectors.append([0.0]*768) # Placeholder
             
             if vectors:
-                self.vectors = np.array(vectors)
+                self.vectors = vectors
                 self.is_ready = True
                 print("Sales Examples Embeddings Initialized.")
                 
@@ -68,31 +62,23 @@ class SimpleExampleRAG:
             query_vec = await self.embedding_fn(query)
             if not query_vec: return ""
             
-            # from sklearn.metrics.pairwise import cosine_similarity
-            # Manual Cosine Similarity with Numpy
-            # scores = cosine_similarity([query_vec], self.vectors)[0]
-            
-            # Normalize query vector
-            norm_q = np.linalg.norm(query_vec)
-            if norm_q == 0: return ""
-            query_vec = query_vec / norm_q
-            
-            # Vectors are already normalized? No, let's normalize them on load or here.
-            # Assuming not normalized.
-            norms_v = np.linalg.norm(self.vectors, axis=1)
-            norms_v[norms_v == 0] = 1e-10 # Avoid init div by zero
-            
-            dot_products = np.dot(self.vectors, query_vec)
-            scores = dot_products / norms_v
+            def cosine_sim(v1, v2):
+                dot = sum(a*b for a, b in zip(v1, v2))
+                norm1 = sum(a*a for a in v1)**0.5
+                norm2 = sum(a*a for a in v2)**0.5
+                if norm1 == 0 or norm2 == 0: return 0
+                return dot / (norm1 * norm2)
+
+            scores = [cosine_sim(query_vec, v) for v in self.vectors]
             
             # Get top K indices
-            top_indices = scores.argsort()[-k:][::-1]
+            indexed_scores = list(enumerate(scores))
+            indexed_scores.sort(key=lambda x: x[1], reverse=True)
+            top_indices = [idx for idx, score in indexed_scores[:k]]
             
             result_str = ""
             for idx in top_indices:
                 u, a = self.examples[idx]
-                # Return only the agent's response to keep the LLM focused on style, 
-                # not the meta-labels like "User:" and "Agent:"
                 result_str += f"{a}\n"
                 
             return result_str.strip()

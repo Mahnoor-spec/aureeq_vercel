@@ -15,7 +15,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
-import numpy as np
 import edge_tts
 from simple_rag import SimpleExampleRAG
 import hardcode_rules as rules
@@ -42,7 +41,7 @@ AUDIO_OUTPUT_DIR = "/tmp" if IS_VERCEL else DATA_DIR
 
 # Global State
 MENU_DATA: List[Dict] = []
-MENU_VECTORS: Optional[np.ndarray] = None
+MENU_VECTORS: Optional[List[List[float]]] = None
 HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 EXAMPLE_RAG: Optional[SimpleExampleRAG] = None
 INIT_LOCK = asyncio.Lock()
@@ -166,8 +165,7 @@ async def init_data():
                 else:
                     vectors.append([0.0]*768) # Fallback
             
-            from sklearn.metrics.pairwise import cosine_similarity
-            MENU_VECTORS = np.array(vectors)
+            MENU_VECTORS = vectors
             log("Embeddings Initialized.")
             
         except Exception as e:
@@ -187,9 +185,15 @@ async def get_nearest_item(query: str):
     if not query_vec:
         return None
         
-    from sklearn.metrics.pairwise import cosine_similarity
-    scores = cosine_similarity([query_vec], MENU_VECTORS)[0]
-    best_idx = np.argmax(scores)
+    def cosine_sim(v1, v2):
+        dot = sum(a*b for a, b in zip(v1, v2))
+        norm1 = sum(a*a for a in v1)**0.5
+        norm2 = sum(a*a for a in v2)**0.5
+        if norm1 == 0 or norm2 == 0: return 0
+        return dot / (norm1 * norm2)
+
+    scores = [cosine_sim(query_vec, v) for v in MENU_VECTORS]
+    best_idx = scores.index(max(scores))
     
     # Threshold check? strictness requires relevance.
     # returning top 1 unconditionally as per strict interaction rules for Path B
