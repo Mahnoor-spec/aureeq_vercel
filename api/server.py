@@ -185,36 +185,29 @@ async def init_data():
                 MENU_DATA = json.load(f)
             log(f"Loaded {len(MENU_DATA)} menu items.")
             
-            log("Initializing Embeddings (Parallel)...")
-            async def get_item_vec(item):
-                text = f"{item['name']} {item['description']} {item['category']}"
-                return await get_embedding(text)
-
-            tasks = [get_item_vec(item) for item in MENU_DATA]
-            raw_vectors = await asyncio.gather(*tasks)
-            
-            vectors = []
-            for vec in raw_vectors:
-                # OpenAI uses 1536 dim, Ollama uses 768. 
-                # We adapt based on what we get, default to 0.0 of len 1536 if None to be safe for OpenAI.
-                vectors.append(vec if vec else [0.0]*1536) 
-
-            MENU_VECTORS = vectors
-            log("Embeddings Initialized.")
+            # VERCEL OPTIMIZATION: Do NOT embed all items on startup. 
+            # It causes timeouts (500 Error). We will rely on Keyword Search (find_item_lenient) 
+            # and lazy-load embeddings only if absolutely necessary (or just skip RAG for Vercel free tier).
+            # For now, we set vectors to None to force fallback logic.
+            MENU_VECTORS = None
+            log("Embeddings: Skipped for Vercel resilience.")
             
         except Exception as e:
             log(f"Data Init Error: {e}")
 
         # Initialize Example RAG
         global EXAMPLE_RAG
-        EXAMPLE_RAG = SimpleExampleRAG(EXAMPLES_TXT_PATH, get_embedding)
-        await EXAMPLE_RAG.load_examples()
+        # VERCEL OPTIMIZATION: Skip loading RAG examples on startup to save time/memory.
+        EXAMPLE_RAG = None
+        # EXAMPLE_RAG = SimpleExampleRAG(EXAMPLES_TXT_PATH, get_embedding)
+        # await EXAMPLE_RAG.load_examples()
         IS_INITIALIZED = True
 
 async def get_nearest_item(query: str):
-    if MENU_VECTORS is None or not MENU_DATA:
-        return None
-    
+    # Fallback to lenients search if vectors are not ready
+    if MENU_VECTORS is None:
+        return find_item_lenient(query)
+
     query_vec = await get_embedding(query)
     if not query_vec:
         return None
@@ -384,8 +377,13 @@ async def shutdown_event():
 @app.post("/chat")
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
+    # Ensure init is called but wrap it to prevent crash
     if not IS_INITIALIZED:
-        await init_data()
+        try:
+            await asyncio.wait_for(init_data(), timeout=10.0)
+        except Exception as e:
+            log(f"Init Timeout/Error: {e}")
+            # Proceed anyway, most data might be loaded
     user_query = request.message
     log(f"--- Chat: {user_query} ---")
     
